@@ -126,3 +126,9 @@ def test_update_with_second_md(any_multidict_class: _MD_Classes) -> None:
     obj1.update(obj2)
     assert obj1 == obj2
     
+def test_update_initalizing_ci_with_different_md(case_insensitive_multidict_class: type[CIMultiDict[str]], any_multidict_class: _MD_Classes):
+    obj1 = any_multidict_class()
+    obj2 = case_insensitive_multidict_class(any_multidict_class([("a", 2)]))
+    obj1.update(obj2)
+    assert ci['a'] == 2
+ 
