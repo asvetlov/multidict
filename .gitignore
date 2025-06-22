@@ -88,3 +88,4 @@ TAGS
 .python-version
 
 /.codspeed
+.dev-testcapi

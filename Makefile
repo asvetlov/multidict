@@ -14,12 +14,15 @@ all: test
 lint:
 	python -Im pre_commit run --all-files --show-diff-on-failure
 
-.develop: .install-deps $(shell find multidict -type f) $(shell find testcapi -type f)
+.develop: .install-deps $(shell find multidict -type f)
 	pip install -e .
-	cd testcapi; pip install -e .
 	@touch .develop
 
-test: .develop
+.dev-testcapi: .install-deps $(shell find devhelpers -type f)
+	cd devhelpers; pip install -e .
+	@touch .dev-testcapi
+
+test: .develop .dev-testcapi
 	@pytest -q
 
 vtest: .develop
