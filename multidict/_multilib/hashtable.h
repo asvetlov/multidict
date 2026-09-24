@@ -33,6 +33,11 @@ typedef struct _md_pos {
     uint64_t version;
 } md_pos_t;
 
+/* Sentinel meaning "could not complete lock-free", for a caller to
+   retry under the lock; never reaches Python. Distinct from 1 (found)
+   / 0 (not found or exhausted) / -1 (error). */
+#define _MD_NEED_LOCK 2
+
 /*
 The multidict's implementation is close to Python's dict except for multiple
 keys.
@@ -382,8 +387,6 @@ _md_resize(MultiDictObject* md, uint8_t log2_newsize, update_marks_t* marks)
     newkeys->usable = newkeys->usable - numentries;
     newkeys->nentries = numentries;
 
-    store_keys(md, newkeys);
-
 #ifdef Py_GIL_DISABLED
     /* Bump the version on every resize, not just when a caller's
        own insert/delete/replace would bump it anyway: a freed
@@ -392,15 +395,21 @@ _md_resize(MultiDictObject* md, uint8_t log2_newsize, update_marks_t* marks)
        elsewhere that detects "did md->keys change under me" by
        comparing the raw pointer alone (see _md_replace()'s and
        _md_update()'s comments, the latter in bulk_update.h) needs a
-       companion signal that can't coincidentally repeat. */
+       companion signal that can't coincidentally repeat. Bumped
+       before the swap, so a lock-free iterator that loads the new
+       table sees the new version too (see _md_next_lockfree()). */
     store_version(md, next_version(md->state));
+#endif
+    store_keys(md, newkeys);
 
+#ifdef Py_GIL_DISABLED
     /* Ownership of oldkeys's entries has already moved to newkeys via
        the memcpy/copy loop above; zeroing nentries tells
        _md_retire()'s cleanup there is nothing left to decref, only
-       memory to free. */
+       memory to free. A lock-free iterator may still be walking the
+       old table, bounded by the count it loaded on entry. */
     if (oldkeys != &empty_htkeys) {
-        oldkeys->nentries = 0;
+        store_nentries(oldkeys, 0);
     }
     _md_retire(md, oldkeys);
 #else
@@ -449,7 +458,7 @@ _md_shrink(MultiDictObject* md, update_marks_t* marks)
             newnentries -= 1;
         }
     }
-    keys->nentries = newnentries;
+    store_nentries(keys, newnentries);
     keys->usable += nentries - newnentries;
     memset(&keys->indices[0], 0xff, ((size_t)1 << keys->log2_index_bytes));
     memset(new_ep, 0, sizeof(entry_t) * (size_t)(nentries - newnentries));
@@ -612,7 +621,7 @@ _md_add_with_hash_steal_refs(MultiDictObject* md, Py_hash_t hash,
        the zeroed tail past every live one, so value is still NULL and
        publish_value() is enough; nothing here has an old reference to
        drop. */
-    entry->key = key;
+    publish_key(entry, key, identity);
     store_hash(entry, hash);
     publish_value(entry, value);
     publish_identity(entry, identity);
@@ -620,7 +629,7 @@ _md_add_with_hash_steal_refs(MultiDictObject* md, Py_hash_t hash,
     store_version(md, next_version(md->state));
     add_used(md, 1);
     keys->usable -= 1;
-    keys->nentries += 1;
+    store_nentries(keys, keys->nentries + 1);
     return 0;
 }
 
@@ -664,7 +673,7 @@ _md_add_for_upd_steal_refs(MultiDictObject* md, Py_hash_t hash,
            entry->value == NULL);
 
     /* See _md_add_with_hash_steal_refs() for the ordering. */
-    entry->key = key;
+    publish_key(entry, key, identity);
     store_hash(entry, hash);
     publish_value(entry, value);
     publish_identity(entry, identity);
@@ -672,7 +681,7 @@ _md_add_for_upd_steal_refs(MultiDictObject* md, Py_hash_t hash,
     store_version(md, next_version(md->state));
     add_used(md, 1);
     keys->usable -= 1;
-    keys->nentries += 1;
+    store_nentries(keys, keys->nentries + 1);
     return 0;
 }
 
@@ -741,15 +750,15 @@ _md_del_at(MultiDictObject* md, size_t slot, entry_t* entry)
        view. The GIL build needs the same order for its own reason: a
        __del__ there can release the GIL (Py_BEGIN_CRITICAL_SECTION is
        a no-op on that build), which would otherwise expose a
-       half-deleted entry -- see #1489. entry->key is read/written as
-       a plain pointer: unlike identity/value, no lock-free reader
-       ever touches it (see the comment above load_identity()). */
+       half-deleted entry -- see #1489. A lock-free iterator reads
+       entry->key too, through try_get_ref(), so it is reset through
+       the same accessors as identity and value. */
     PyObject* identity = load_identity(entry);
     PyObject* key = entry->key;
     PyObject* value = load_value(entry);
 
     reset_identity(entry);
-    entry->key = NULL;
+    reset_key(entry);
     reset_value(entry);
     htkeys_set_index(keys, slot, DKIX_DUMMY);
     add_used(md, -1);
@@ -772,7 +781,7 @@ _md_del_at_deferred(MultiDictObject* md, size_t slot, entry_t* entry,
     PyObject* value = load_value(entry);
 
     reset_identity(entry);
-    entry->key = NULL;
+    reset_key(entry);
     reset_value(entry);
     htkeys_set_index(keys, slot, DKIX_DUMMY);
     add_used(md, -1);
@@ -805,7 +814,7 @@ _md_del_at_for_upd_deferred(MultiDictObject* md, size_t slot, entry_t* entry,
         return -1;
     }
     PyObject* old_key = entry->key;
-    entry->key = NULL;
+    reset_key(entry);
     reflist_push_reserved(defer, old_key);
 
     if (_reflist_reserve_one(defer) < 0) {
@@ -951,6 +960,84 @@ cleanup:
     }
     return ret;
 }
+
+#ifdef Py_GIL_DISABLED
+/* md_next()/md_prev() without the critical section, for the iterators.
+   Returns 1 with new references in pkey and pvalue, 0 at the end, -1 with
+   an exception set, or _MD_NEED_LOCK when a concurrent change was
+   caught mid-entry (a key or value that could not be referenced, or a
+   CIMultiDict key whose istr is not cached yet, which the locked path
+   builds and stores); the caller then retries under the lock. An entry
+   deleted between the version check and the reads is reported by the
+   next call's version check, exactly as it would be after md_next()'s
+   own critical section. */
+static inline int
+_md_next_lockfree(MultiDictObject* md, md_pos_t* pos, bool reverse,
+                  PyObject** pkey, PyObject** pvalue)
+{
+    htkeys_t* keys = _md_reader_enter(md);
+    /* Version after the table: a writer bumps the version before it
+       swaps md->keys, so a table loaded after the swap is always seen
+       with the new version. The position is clamped to this table's
+       bounds all the same, so no ordering slip can read past it. */
+    if (pos->version != load_version(md)) {
+        _md_reader_exit(md, keys);
+        PyErr_SetString(PyExc_RuntimeError,
+                        "MultiDict is changed during iteration");
+        return -1;
+    }
+    Py_ssize_t nentries = load_nentries(keys);
+    entry_t* entries = htkeys_entries(keys);
+    Py_ssize_t i = pos->pos;
+    if (i > nentries) {
+        i = nentries;
+    }
+    if (reverse && i == nentries) {
+        i = nentries - 1;
+    }
+    int result = 0;
+    for (; reverse ? i >= 0 : i < nentries; i += reverse ? -1 : 1) {
+        entry_t* entry = entries + i;
+        if (load_identity(entry) == NULL) {
+            continue;  // deleted, or not published yet
+        }
+        PyObject* key = NULL;
+        PyObject* value = NULL;
+        if (pkey != NULL) {
+            key = try_get_ref(&entry->key);
+            if (key == NULL) {
+                result = _MD_NEED_LOCK;
+                break;
+            }
+            if (md->is_ci && !IStr_Check(md->state, key)) {
+                Py_DECREF(key);
+                result = _MD_NEED_LOCK;
+                break;
+            }
+        }
+        if (pvalue != NULL) {
+            value = try_get_ref(&entry->value);
+            if (value == NULL) {
+                Py_XDECREF(key);
+                result = _MD_NEED_LOCK;
+                break;
+            }
+        }
+        if (pkey != NULL) {
+            *pkey = key;
+        }
+        if (pvalue != NULL) {
+            *pvalue = value;
+        }
+        i += reverse ? -1 : 1;
+        result = 1;
+        break;
+    }
+    pos->pos = i;
+    _md_reader_exit(md, keys);
+    return result;
+}
+#endif /* Py_GIL_DISABLED */
 
 static inline void
 md_init_pos_reverse(MultiDictObject* md, md_pos_t* pos)
@@ -1171,11 +1258,6 @@ _md_get_one_locked(MultiDictObject* md, PyObject* identity, Py_hash_t hash,
 
 #ifdef Py_GIL_DISABLED
 
-/* Sentinel meaning "could not complete lock-free"; never returned to
-   md_get_one()'s own caller, only used between the two functions
-   below. Distinct from 1 (found) / 0 (not found) / -1 (error). */
-#define _MD_NEED_LOCK 2
-
 static inline int
 _md_get_one_lockfree(MultiDictObject* md, PyObject* identity, Py_hash_t hash,
                      PyObject** ret)
@@ -1251,8 +1333,6 @@ md_get_one(MultiDictObject* md, PyObject* key, PyObject** ret)
     Py_DECREF(identity);
     return result;
 }
-
-#undef _MD_NEED_LOCK
 
 #else /* !Py_GIL_DISABLED */
 
@@ -1678,7 +1758,7 @@ _md_replace(MultiDictObject* md, PyObject* key, PyObject* value,
                 // old_key/old_value decref deferred -- see reflist_t
                 PyObject* old_key = entry->key;
                 PyObject* old_value = load_value(entry);
-                entry->key = Py_NewRef(key);
+                publish_key(entry, Py_NewRef(key), entry->identity);
                 publish_value(entry, Py_NewRef(value));
                 /* Push both unconditionally, not with `||`: a failed
                    first push already decref'd old_key itself (see

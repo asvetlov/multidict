@@ -1,0 +1,5 @@
+Sped up iterating over a :class:`~multidict.MultiDict` on the
+free-threaded build: the ``keys()``, ``values()`` and ``items()``
+iterators now read entries without taking the mapping's lock on every
+step, the way lookups already did, and fall back to the lock only when
+they catch a concurrent change mid-entry -- by :user:`asvetlov`.

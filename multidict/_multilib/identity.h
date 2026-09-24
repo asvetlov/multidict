@@ -260,7 +260,7 @@ _md_ensure_key(MultiDictObject* md, entry_t* entry)
     PyObject* identity = Py_NewRef(entry->identity);
     PyObject* key = _md_calc_key(md, old_key, identity);
     if (key != NULL && md->version == version) {
-        entry->key = Py_NewRef(key);
+        publish_key(entry, Py_NewRef(key), identity);
         Py_DECREF(old_key);
     }
     /* These can run __del__ or suspend the critical section, so the caller

@@ -135,6 +135,12 @@ atomic_store_ptr(void** obj, void* value)
     __atomic_store_n(obj, value, __ATOMIC_SEQ_CST);
 }
 
+static inline void
+atomic_store_ptr_release(void** obj, void* value)
+{
+    __atomic_store_n(obj, value, __ATOMIC_RELEASE);
+}
+
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && \
     !defined(__STDC_NO_ATOMICS__)
 
@@ -241,6 +247,12 @@ static inline void
 atomic_store_ptr(void** obj, void* value)
 {
     atomic_store_explicit((void* _Atomic*)obj, value, memory_order_seq_cst);
+}
+
+static inline void
+atomic_store_ptr_release(void** obj, void* value)
+{
+    atomic_store_explicit((void* _Atomic*)obj, value, memory_order_release);
 }
 
 static inline void*
@@ -420,6 +432,14 @@ atomic_load_ptr(void* const* obj)
 
 static inline void
 atomic_store_ptr(void** obj, void* value)
+{
+    (void)_InterlockedExchangePointer((void* volatile*)obj, value);
+}
+
+/* No release-only pointer exchange in the MSVC intrinsics; the full
+   barrier is correct, just not cheaper. */
+static inline void
+atomic_store_ptr_release(void** obj, void* value)
 {
     (void)_InterlockedExchangePointer((void* volatile*)obj, value);
 }

@@ -97,11 +97,19 @@ multidict_items_iter_iternext(MultidictIter* self)
     PyObject* ret = NULL;
 
     int res;
-    Py_BEGIN_CRITICAL_SECTION(self->md);
-    res = self->reverse
-              ? md_prev(self->md, &self->current, NULL, &key, &value)
-              : md_next(self->md, &self->current, NULL, &key, &value);
-    Py_END_CRITICAL_SECTION();
+#ifdef Py_GIL_DISABLED
+    res = _md_next_lockfree(
+        self->md, &self->current, self->reverse, &key, &value);
+    if (res == _MD_NEED_LOCK) {
+#endif
+        Py_BEGIN_CRITICAL_SECTION(self->md);
+        res = self->reverse
+                  ? md_prev(self->md, &self->current, NULL, &key, &value)
+                  : md_next(self->md, &self->current, NULL, &key, &value);
+        Py_END_CRITICAL_SECTION();
+#ifdef Py_GIL_DISABLED
+    }
+#endif
     if (res < 0) {
         return NULL;
     }
@@ -128,11 +136,19 @@ multidict_values_iter_iternext(MultidictIter* self)
     PyObject* value = NULL;
 
     int res;
-    Py_BEGIN_CRITICAL_SECTION(self->md);
-    res = self->reverse
-              ? md_prev(self->md, &self->current, NULL, NULL, &value)
-              : md_next(self->md, &self->current, NULL, NULL, &value);
-    Py_END_CRITICAL_SECTION();
+#ifdef Py_GIL_DISABLED
+    res = _md_next_lockfree(
+        self->md, &self->current, self->reverse, NULL, &value);
+    if (res == _MD_NEED_LOCK) {
+#endif
+        Py_BEGIN_CRITICAL_SECTION(self->md);
+        res = self->reverse
+                  ? md_prev(self->md, &self->current, NULL, NULL, &value)
+                  : md_next(self->md, &self->current, NULL, NULL, &value);
+        Py_END_CRITICAL_SECTION();
+#ifdef Py_GIL_DISABLED
+    }
+#endif
     if (res < 0) {
         return NULL;
     }
@@ -150,10 +166,19 @@ multidict_keys_iter_iternext(MultidictIter* self)
     PyObject* key = NULL;
 
     int res;
-    Py_BEGIN_CRITICAL_SECTION(self->md);
-    res = self->reverse ? md_prev(self->md, &self->current, NULL, &key, NULL)
-                        : md_next(self->md, &self->current, NULL, &key, NULL);
-    Py_END_CRITICAL_SECTION();
+#ifdef Py_GIL_DISABLED
+    res =
+        _md_next_lockfree(self->md, &self->current, self->reverse, &key, NULL);
+    if (res == _MD_NEED_LOCK) {
+#endif
+        Py_BEGIN_CRITICAL_SECTION(self->md);
+        res = self->reverse
+                  ? md_prev(self->md, &self->current, NULL, &key, NULL)
+                  : md_next(self->md, &self->current, NULL, &key, NULL);
+        Py_END_CRITICAL_SECTION();
+#ifdef Py_GIL_DISABLED
+    }
+#endif
     if (res < 0) {
         return NULL;
     }

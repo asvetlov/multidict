@@ -1,6 +1,6 @@
 import threading
 import traceback
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -216,3 +216,63 @@ def test_race_condition_getversion_vs_mutation(
     # go backwards even though it can see stale values.
     assert not errors, f"Unexpected errors during concurrent execution: {errors}"
     assert seen
+
+
+@pytest.mark.c_extension
+def test_race_condition_reverse_iterators_vs_clear(
+    any_multidict_class: type[CIMultiDict[str] | MultiDict[str]],
+) -> None:
+    """Reverse and forward iterators racing clear() and del.
+
+    The free-threaded iterators read entries without the critical
+    section: clear() retires the table under an active reader, del
+    empties an entry mid-walk, and on CIMultiDict the first pass over
+    a str key still builds and caches its istr under the lock.
+    """
+    if getattr(any_multidict_class, "__module__", "").endswith("_multidict_py"):
+        pytest.skip("Test is only applicable to the C extension")
+
+    # Any: the abstract view types are not Reversible, the concrete ones are.
+    md: Any = any_multidict_class()
+    stop = threading.Event()
+    errors: list[tuple[str, int, str, str]] = []
+
+    def writer(target: Any) -> None:
+        for i in range(512):
+            try:
+                for j in range(16):
+                    target.add(f"K-{j}", f"v{i}")
+                for j in range(0, 16, 3):
+                    target.pop(f"K-{j}", None)
+                target[f"K-{i % 16}"] = f"r{i}"
+                target.clear()
+            except Exception as e:  # pragma: no cover
+                errors.append(("writer", i, type(e).__name__, str(e)))
+        stop.set()
+
+    def reader(target: Any) -> None:
+        i = 0
+        while not stop.is_set() and i < 4096:
+            i += 1
+            try:
+                list(reversed(target.items()))
+                list(reversed(target.keys()))
+                list(reversed(target.values()))
+                list(target.items())
+            except RuntimeError:  # pragma: no cover
+                # "MultiDict is changed during iteration" is the expected
+                # outcome when the writer wins the race.
+                pass
+            except Exception as e:  # pragma: no cover
+                errors.append(("reader", i, type(e).__name__, str(e)))
+
+    threads = [threading.Thread(target=f, args=(md,)) for f in [writer, reader, reader]]
+    for t in threads:
+        t.start()
+    try:
+        for t in threads:
+            t.join(timeout=120)
+    finally:
+        stop.set()
+    assert not any(t.is_alive() for t in threads)
+    assert not errors, f"Unexpected errors during concurrent execution: {errors}"

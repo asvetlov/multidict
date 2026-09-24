@@ -82,13 +82,13 @@ _md_update(MultiDictObject* md, Py_hash_t hash, PyObject* identity,
                        it keeps the key at its original position. */
                     assert(entry->value == NULL);
                     bitmap_clear(&marks->deleted, iter.index);
-                    entry->key = Py_NewRef(key);
+                    publish_key(entry, Py_NewRef(key), entry->identity);
                     publish_value(entry, Py_NewRef(value));
                 } else {
                     // old_key/old_value decref deferred: see reflist_t
                     PyObject* old_key = entry->key;
                     PyObject* old_value = load_value(entry);
-                    entry->key = Py_NewRef(key);
+                    publish_key(entry, Py_NewRef(key), entry->identity);
                     publish_value(entry, Py_NewRef(value));
                     /* Push both unconditionally, not with `||`: a
                        failed first push already decref'd old_key itself

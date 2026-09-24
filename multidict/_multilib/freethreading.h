@@ -127,6 +127,55 @@ reset_value(entry_t* entry)
     atomic_store_ptr((void**)&entry->value, NULL);
 }
 
+static inline PyObject*
+load_key(entry_t* entry)
+{
+    return (PyObject*)atomic_load_ptr((void* const*)&entry->key);
+}
+
+/* See publish_identity(). The add path is ordered by the identity
+   publish that follows, but the replace and istr-cache paths swap a
+   key in place under a published identity, and a lock-free iterator
+   pairs try_get_ref() against this store directly. */
+static inline void
+publish_key(entry_t* entry, PyObject* key, PyObject* identity)
+{
+    /* `identity` is the entry's own identity, published or about to be:
+       it is enabled by its own publish, so a key that is the same
+       object (an exact str on MultiDict, an already lower-case one on
+       CIMultiDict) needs nothing more, and the atomic or the call does
+       is not free on the insert path. */
+    if (key != identity) {
+        PyUnstable_EnableTryIncRef(key);
+    }
+    /* Release, not seq_cst: on the add path the identity's own seq_cst
+       publish orders this store, and on the in-place swaps a lock-free
+       reader's try_get_ref() load acquires against it; a full barrier
+       per insert buys nothing. */
+    atomic_store_ptr_release((void**)&entry->key, key);
+}
+
+/* See reset_identity(). */
+static inline void
+reset_key(entry_t* entry)
+{
+    atomic_store_ptr((void**)&entry->key, NULL);
+}
+
+/* A lock-free iterator bounds its walk by this; a writer appends past
+   it before publishing the entry, so relaxed is enough. */
+static inline Py_ssize_t
+load_nentries(const htkeys_t* keys)
+{
+    return atomic_load_ssize_relaxed(&keys->nentries);
+}
+
+static inline void
+store_nentries(htkeys_t* keys, Py_ssize_t nentries)
+{
+    atomic_store_ssize_relaxed(&keys->nentries, nentries);
+}
+
 /* _md_replace()/_md_update() overwrite hash in place on a live entry,
    so a reader's plain read would race it. Relaxed is enough: it is
    read only after the identity check has ordered the rest. */
@@ -239,6 +288,37 @@ static inline void
 reset_value(entry_t* entry)
 {
     entry->value = NULL;
+}
+
+static inline PyObject*
+load_key(entry_t* entry)
+{
+    return entry->key;
+}
+
+static inline void
+publish_key(entry_t* entry, PyObject* key, PyObject* identity)
+{
+    (void)identity;
+    entry->key = key;
+}
+
+static inline void
+reset_key(entry_t* entry)
+{
+    entry->key = NULL;
+}
+
+static inline Py_ssize_t
+load_nentries(const htkeys_t* keys)
+{
+    return keys->nentries;
+}
+
+static inline void
+store_nentries(htkeys_t* keys, Py_ssize_t nentries)
+{
+    keys->nentries = nentries;
 }
 
 static inline Py_hash_t
