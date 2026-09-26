@@ -115,7 +115,7 @@ e.g.:
 Please note, the pure Python (uncompiled) version is dramatically slower: the
 `pure-Python backend table
 <https://multidict.aio-libs.org/en/latest/benchmark.html#results>`_ measures
-it at roughly 7 to 80 times more instructions than the C extension, depending
+it at roughly 8 to 105 times more instructions than the C extension, depending
 on the operation. Unless the target platform genuinely cannot build the C
 extension, leave ``MULTIDICT_NO_EXTENSIONS`` unset and let it compile.
 
