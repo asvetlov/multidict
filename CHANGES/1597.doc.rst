@@ -1,3 +1,3 @@
 Refreshed the tables in the benchmarking reference for the 7.0.0 release,
-and corrected the range quoted for the pure-Python backend, which had left
-out the empty constructor -- by :user:`asvetlov`.
+and replaced the range quoted for the pure-Python backend with its average
+slowdown -- by :user:`asvetlov`.
