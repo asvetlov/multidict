@@ -78,13 +78,40 @@ store_keys(MultiDictObject* md, htkeys_t* keys)
     atomic_store_ptr((void**)&md->keys, keys);
 }
 
-/* Shared across multidicts, so no two ever report the same version.
-   Process-wide rather than in mod_state, so a batch outliving its
-   module state cannot overlap a newer one. A fetch-add per mutation
-   bounced one cache line between every mutating thread, so each thread
-   reserves VERSION_BATCH at a time and hands it out VERSION_BLOCK at a
-   time, one block per multidict. Versions stay unique but are unordered
-   across threads, which getversion() never promised. */
+/* Versions on free-threaded builds.
+
+   Every mutation stores a new md->version, and no two multidicts may ever
+   report the same one: getversion() users key caches on (id(md), version),
+   and an id is reused once its multidict is freed.
+
+   One process-wide fetch-add per mutation bounced a cache line between
+   every mutating thread, and a thread-local counter costs a
+   __tls_get_addr() call per mutation in a shared object. So versions are
+   handed out at three levels:
+
+     global_version  process-wide atomic; a thread reserves VERSION_BATCH
+                     versions from it at a time.
+     version_block   thread-local; the thread splits its batch into blocks
+                     of VERSION_BLOCK, one per multidict that needs one.
+     md->version     the multidict's cursor into its own block, advanced
+                     by bump_version() under md's critical section.
+
+   A mutation is therefore a plain increment of a field md already holds.
+   Thread-local storage is touched once per block: when a multidict is
+   created, then every VERSION_BLOCK - 1 mutations. global_version is
+   touched once per VERSION_BATCH / VERSION_BLOCK blocks.
+
+   No block's base, a multiple of VERSION_BLOCK, is ever handed out as a
+   version, and no batch's base, a multiple of VERSION_BATCH, as a block.
+   That keeps a spent block, a spent batch and a new multidict (version 0)
+   recognizable with one mask test each; see bump_version().
+
+   A block belongs to one multidict and a batch to one thread, so versions
+   are unique. They are not ordered: a multidict's next block can come from
+   an older batch of another thread, and getversion() only ever promised
+   equality. global_version is process-wide rather than in mod_state, so a
+   batch outliving its module state cannot overlap a newer one. The GIL
+   build keeps a single plain counter. */
 #define VERSION_BATCH 65536
 #define VERSION_BLOCK 256
 
